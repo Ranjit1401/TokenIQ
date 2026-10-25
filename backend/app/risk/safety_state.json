@@ -3,11 +3,11 @@
   "kill_switch_engaged": false,
   "kill_switch_reason": null,
   "kill_switch_activated_at": 1792890825,
-  "last_reset_at": 1792890827,
-  "last_reset_reason": "Operator verification complete",
+  "last_reset_at": 1792928581,
+  "last_reset_reason": "Operator deliberate testnet activation",
   "daily_date": "2026-10-25",
   "orders_submitted_today": 15,
-  "evaluations_today": 103,
+  "evaluations_today": 106,
   "evaluated_signal_ids": {
     "preview_sig_SOLUSD_1792886609_9183": 1792886609,
     "ord_exec_SOLUSD_1792886631_bbfb": 1792886631,
@@ -96,7 +96,7 @@
     "dry_run_err_1792890830": 1792890830,
     "sig_manual_1792909515703": 1792909627,
     "sig_1792909636287": 1792909652,
-    "sig_margin_test": 1792927701,
-    "sig_daily_loss_test": 1792927701
+    "sig_margin_test": 1792928057,
+    "sig_daily_loss_test": 1792928057
   }
 }
