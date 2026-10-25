@@ -38,10 +38,12 @@ class DeltaExchangeClient:
         self.api_key = api_key if api_key is not None else settings.DELTA_API_KEY
         self.api_secret = api_secret if api_secret is not None else settings.DELTA_API_SECRET
 
+        self._server_time_offset: int = 0
         self._headers = {
             "Accept": "application/json",
             "User-Agent": "TokenIQ-Dashboard/1.0 (+https://github.com/tokeniq)",
         }
+        self._account_overview_cache: Optional[Tuple[Dict[str, Any], float]] = None
 
     def _resolve_url(self, endpoint: str) -> Tuple[str, str]:
         """
@@ -87,7 +89,7 @@ class DeltaExchangeClient:
             raise ValueError("Delta API Secret is not configured.")
 
         # Delta requires timestamp in integer seconds
-        ts = timestamp or str(int(time.time()))
+        ts = timestamp or str(int(time.time()) + self._server_time_offset)
 
         # Canonical path must start with /v2/
         if not path.startswith("/"):
@@ -174,7 +176,10 @@ class DeltaExchangeClient:
         validate_testnet_host(self.host_url)
 
     async def _get_authenticated(
-        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        _is_retry: bool = False,
     ) -> Dict[str, Any]:
         """
         Authenticated GET request using HMAC-SHA256 signature.
@@ -204,6 +209,19 @@ class DeltaExchangeClient:
                         f"Delta authenticated request returned HTTP {response.status_code} for {canonical_path}"
                     )
                     error_text = response.text
+                    try:
+                        err_json = response.json()
+                        err_code = (err_json.get("error") or {}).get("code")
+                        if err_code == "expired_signature" and not _is_retry:
+                            server_time = (err_json.get("error") or {}).get("context", {}).get("server_time")
+                            if server_time:
+                                self._server_time_offset = int(server_time) - int(time.time())
+                                logger.info(
+                                    f"Adjusted Delta server time offset to {self._server_time_offset}s after expired signature. Retrying request once..."
+                                )
+                                return await self._get_authenticated(endpoint, params=params, _is_retry=True)
+                    except Exception:
+                        pass
                     err = RuntimeError(f"Delta API HTTP {response.status_code}: {error_text}")
                     setattr(err, "status_code", response.status_code)
                     setattr(err, "response_body", error_text)
@@ -239,18 +257,50 @@ class DeltaExchangeClient:
         data = await self._get_authenticated("/v2/wallet/balances")
         return data.get("result") or []
 
-    async def get_positions(self) -> List[Dict[str, Any]]:
+    async def get_positions(
+        self,
+        product_id: Optional[int] = None,
+        underlying_asset_symbol: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve read-only open positions from Delta Exchange.
         Endpoint: GET /v2/positions/margined (with fallback to /v2/positions)
+
+        Note: Delta Exchange's /v2/positions strictly requires either product_id
+        or underlying_asset_symbol. Calling /v2/positions without either parameter
+        causes HTTP 400 bad_schema.
         """
+        params: Dict[str, Any] = {}
+        if product_id is not None:
+            params["product_id"] = product_id
+        elif underlying_asset_symbol is not None:
+            params["underlying_asset_symbol"] = underlying_asset_symbol
+
         try:
-            data = await self._get_authenticated("/v2/positions/margined")
-            return data.get("result") or []
+            data = await self._get_authenticated("/v2/positions/margined", params=params if params else None)
+            res = data.get("result")
+            if isinstance(res, list):
+                return res
+            elif isinstance(res, dict):
+                return [res] if float(res.get("size") or 0.0) != 0.0 else []
+            return []
         except Exception as exc:
+            # If no product filter was provided, we cannot fall back to /v2/positions
+            # because /v2/positions requires product_id or underlying_asset_symbol.
+            if not params:
+                logger.warning(f"Failed /v2/positions/margined without product filter: {exc}")
+                raise exc
+
             logger.warning(f"Failed /v2/positions/margined, falling back to /v2/positions: {exc}")
-            data = await self._get_authenticated("/v2/positions")
-            return data.get("result") or []
+            data = await self._get_authenticated("/v2/positions", params=params)
+            res = data.get("result")
+            if isinstance(res, list):
+                return res
+            elif isinstance(res, dict):
+                if product_id is not None and "product_id" not in res:
+                    res["product_id"] = product_id
+                return [res] if float(res.get("size") or 0.0) != 0.0 else []
+            return []
 
     async def get_open_orders(self, product_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -439,12 +489,20 @@ class DeltaExchangeClient:
                 "diagnostic": diagnostic,
             }
 
-    async def get_account_overview(self) -> Dict[str, Any]:
+    async def get_account_overview(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Consolidate complete read-only testnet account overview:
         balances, positions, open orders, and recent order history.
         Never fabricates balances; accurately reports exchange state or diagnostics.
+        Uses a short 2.5-second in-memory cache to prevent redundant exchange hammering
+        during parallel status polling from dashboard components.
         """
+        now = time.time()
+        if not force_refresh and self._account_overview_cache:
+            cache_data, cache_time = self._account_overview_cache
+            if (now - cache_time) < 2.5:
+                return cache_data
+
         masked = (
             f"{self.api_key[:3]}...{self.api_key[-3:]}"
             if self.api_key and len(self.api_key) > 6
@@ -515,6 +573,8 @@ class DeltaExchangeClient:
         total_bal_usd = 0.0
         avail_bal_usd = 0.0
         margin_used_usd = 0.0
+        order_margin_usd = 0.0
+        position_margin_usd = 0.0
 
         for b in balances_raw:
             try:
@@ -522,6 +582,8 @@ class DeltaExchangeClient:
                 bal = float(b.get("balance") or 0.0)
                 avail = float(b.get("available_balance") or 0.0)
                 blocked = float(b.get("blocked_margin") or 0.0)
+                o_margin = float(b.get("order_margin") or 0.0)
+                p_margin = float(b.get("position_margin") or 0.0)
                 # For USDT or USD, assume 1:1 USD valuation
                 usd_val = bal if sym in ("USDT", "USD", "USDC") else None
 
@@ -529,6 +591,8 @@ class DeltaExchangeClient:
                     total_bal_usd += bal
                     avail_bal_usd += avail
                     margin_used_usd += blocked
+                    order_margin_usd += o_margin
+                    position_margin_usd += p_margin
 
                 normalized_balances.append({
                     "asset_id": int(b.get("asset_id") or 0),
@@ -536,6 +600,8 @@ class DeltaExchangeClient:
                     "balance": round(bal, 6),
                     "available_balance": round(avail, 6),
                     "blocked_margin": round(blocked, 6),
+                    "order_margin": round(o_margin, 6),
+                    "position_margin": round(p_margin, 6),
                     "usd_value": round(usd_val, 2) if usd_val is not None else None,
                 })
             except Exception:
@@ -627,7 +693,8 @@ class DeltaExchangeClient:
             except Exception:
                 continue
 
-        return {
+        equity_usd = total_bal_usd + total_upnl_usd
+        result = {
             "authenticated": is_auth,
             "is_testnet": True,
             "environment": "testnet",
@@ -635,18 +702,25 @@ class DeltaExchangeClient:
             "masked_api_key": masked,
             "client_ip": client_ip,
             "total_balance_usd": round(total_bal_usd, 2),
+            "account_equity_usd": round(equity_usd, 2),
             "available_balance_usd": round(avail_bal_usd, 2),
             "total_margin_used_usd": round(margin_used_usd, 2),
+            "order_margin_usd": round(order_margin_usd, 2),
+            "position_margin_usd": round(position_margin_usd, 2),
             "total_unrealized_pnl_usd": round(total_upnl_usd, 4),
+            "account_currency": "USD",
             "balances": normalized_balances,
             "positions": normalized_positions,
             "open_orders": normalized_open_orders,
             "recent_orders": normalized_recent_orders,
             "last_updated_at": int(time.time()),
+            "last_balance_update_timestamp": int(time.time()),
             "diagnostic": diagnostic,
             "warning": "IP Whitelist or Auth Issue: verify demo credentials" if not is_auth else None,
             "disclaimer": "TESTNET DEMO ONLY: All balances, positions, and orders represent simulated testnet funds. Live automated trading is disabled.",
         }
+        self._account_overview_cache = (result, now)
+        return result
 
     def parse_ticker(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Parse raw Delta Exchange ticker object safely into normalized format."""
@@ -802,7 +876,7 @@ class DeltaExchangeClient:
         seen_times = set()
         candles: List[Dict[str, Any]] = []
         current_end = end
-        max_chunks = 3
+        max_chunks = 10
         chunks_fetched = 0
 
         while current_end > start and chunks_fetched < max_chunks:

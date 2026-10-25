@@ -1,0 +1,26 @@
+{
+  "updated_at": 1792926966,
+  "signals": [
+    {
+      "signal_id": "sig_test_dedup_1",
+      "strategy_id": "ema_crossover",
+      "strategy_version": "1.0.0",
+      "symbol": "BTCUSD",
+      "timeframe": "1h",
+      "candle_timestamp": 1700000000,
+      "signal_direction": "BUY",
+      "position_intent": "OPEN_LONG",
+      "entry_rationale": "EMA cross",
+      "intended_price": 80000.0,
+      "intended_quantity": 1.0,
+      "stop_loss_price": null,
+      "take_profit_price": null,
+      "created_at": 1792926966,
+      "idempotency_key": "idemp_key_hash_12345",
+      "lifecycle_state": "GENERATED",
+      "rejection_reason": null,
+      "client_order_id": null,
+      "exchange_order_id": null
+    }
+  ]
+}

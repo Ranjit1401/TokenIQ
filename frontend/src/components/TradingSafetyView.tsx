@@ -49,16 +49,17 @@ import type {
   OrderPreviewResponseData,
   OrderExecutionRecordData,
 } from '../types/market';
+import { AutomatedTradingPanel } from './AutomatedTradingPanel';
 
 interface TradingSafetyViewProps {
   onSelectSymbol?: (symbol: string) => void;
 }
 
-type SafetyViewMode = 'safety' | 'execution';
+type SafetyViewMode = 'safety' | 'execution' | 'automation';
 
-export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
+export const TradingSafetyView: React.FC<TradingSafetyViewProps> = ({ onSelectSymbol }) => {
   // Navigation mode
-  const [viewMode, setViewMode] = useState<SafetyViewMode>('execution');
+  const [viewMode, setViewMode] = useState<SafetyViewMode>('automation');
 
   // Status & limits state
   const [status, setStatus] = useState<TradingStatusData | null>(null);
@@ -71,11 +72,11 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
   // Editable config state
   const [isEditingConfig, setIsEditingConfig] = useState<boolean>(false);
   const [configForm, setConfigForm] = useState<RiskConfigData>({
-    max_order_notional_usd: 5000,
-    max_position_size: 50,
-    max_daily_realized_loss_usd: 500,
-    max_orders_per_day: 100,
-    max_concurrent_positions: 3,
+    max_order_notional_usd: 500,
+    max_position_size: 10,
+    max_daily_realized_loss_usd: 100,
+    max_orders_per_day: 20,
+    max_concurrent_positions: 1,
     min_stop_loss_distance_pct: 0.5,
     max_signal_age_seconds: 300,
   });
@@ -565,7 +566,7 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
               ${(status?.daily_realized_loss_usd ?? 0).toFixed(2)}
             </span>
             <span className="text-xs text-slate-500 font-mono">
-              / ${(config?.max_daily_realized_loss_usd ?? 500).toFixed(0)} max
+              / ${(config?.max_daily_realized_loss_usd ?? 100).toFixed(0)} max
             </span>
           </div>
           <span className="text-[11px] text-slate-400 mt-2 font-mono">
@@ -596,6 +597,19 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
       <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
         <div className="flex items-center gap-3">
           <button
+            onClick={() => setViewMode('automation')}
+            className={`px-4 py-2 rounded-xl text-xs font-bold font-mono flex items-center gap-2 transition ${
+              viewMode === 'automation'
+                ? 'bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-950/50'
+                : 'bg-white/5 text-slate-400 hover:text-white hover:bg-white/10'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>Automated Trading Engine</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">AUTOPILOT</span>
+          </button>
+
+          <button
             onClick={() => setViewMode('execution')}
             className={`px-4 py-2 rounded-xl text-xs font-bold font-mono flex items-center gap-2 transition ${
               viewMode === 'execution'
@@ -604,7 +618,7 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
             }`}
           >
             <Send className="w-3.5 h-3.5" />
-            <span>Testnet Order Execution (Two-Stage)</span>
+            <span>Manual Execution (Two-Stage)</span>
           </button>
 
           <button
@@ -616,7 +630,7 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Risk Controls & Dry-Run Sandbox</span>
+            <span>Risk Controls & Sandbox</span>
           </button>
         </div>
 
@@ -1279,31 +1293,31 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
                     <span className="text-slate-400">Max Order Notional</span>
                     <span className="font-mono font-bold text-white">
-                      ${(config?.max_order_notional_usd ?? 5000).toLocaleString()} USD
+                      ${(config?.max_order_notional_usd ?? 500).toLocaleString()} USD
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
                     <span className="text-slate-400">Max Position Size</span>
                     <span className="font-mono font-bold text-white">
-                      {config?.max_position_size ?? 50} contracts
+                      {config?.max_position_size ?? 10} contracts
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
                     <span className="text-slate-400">Max Daily Realized Loss</span>
                     <span className="font-mono font-bold text-white">
-                      ${(config?.max_daily_realized_loss_usd ?? 500).toLocaleString()} USD
+                      ${(config?.max_daily_realized_loss_usd ?? 100).toLocaleString()} USD
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
                     <span className="text-slate-400">Max Orders Per Day</span>
                     <span className="font-mono font-bold text-white">
-                      {config?.max_orders_per_day ?? 100}
+                      {config?.max_orders_per_day ?? 20}
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
                     <span className="text-slate-400">Max Concurrent Positions</span>
                     <span className="font-mono font-bold text-white">
-                      {config?.max_concurrent_positions ?? 3}
+                      {config?.max_concurrent_positions ?? 1}
                     </span>
                   </div>
                   <div className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.03]">
@@ -1488,6 +1502,17 @@ export const TradingSafetyView: React.FC<TradingSafetyViewProps> = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ====================================================================== */}
+      {/* MODE 3: AUTOMATED TRADING ENGINE                                       */}
+      {/* ====================================================================== */}
+      {viewMode === 'automation' && (
+        <AutomatedTradingPanel
+          onSelectSymbol={onSelectSymbol}
+          tradingStatus={status}
+          onRefreshParent={() => fetchData(false)}
+        />
       )}
 
       {/* Kill Switch Reset Modal */}

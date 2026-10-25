@@ -3,7 +3,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException, status
 
 from app.backtesting.engine import BacktestValidationError
-from app.backtesting.models import BacktestRequest, BacktestResult
+from app.backtesting.models import BacktestRequest
 from app.backtesting.service import backtest_service
 
 logger = logging.getLogger("backtesting_routes")
@@ -25,7 +25,7 @@ async def get_backtest_config_options() -> Dict[str, Any]:
 @router.post("/run", response_model=Dict[str, Any])
 async def run_backtest(request: BacktestRequest) -> Dict[str, Any]:
     """
-    Execute a historical backtest of the EMA Crossover (9/21) + RSI strategy against
+    Execute a historical backtest of the Triple EMA strategy against
     real Delta Exchange India historical market data.
     """
     try:

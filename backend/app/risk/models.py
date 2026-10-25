@@ -23,27 +23,27 @@ class RiskConfig(BaseModel):
     All monetary and quantity calculations use decimal-safe representations.
     """
     max_order_notional_usd: float = Field(
-        default=5000.0,
+        default=500.0,
         gt=0,
         description="Maximum allowed notional value for a single order in USD",
     )
     max_position_size: float = Field(
-        default=50.0,
+        default=10.0,
         gt=0,
         description="Maximum contract quantity allowed for a single position",
     )
     max_daily_realized_loss_usd: float = Field(
-        default=500.0,
+        default=100.0,
         gt=0,
         description="Maximum daily realized loss before trading is halted (USD)",
     )
     max_orders_per_day: int = Field(
-        default=100,
+        default=20,
         gt=0,
         description="Maximum number of submitted orders allowed per calendar day",
     )
     max_concurrent_positions: int = Field(
-        default=3,
+        default=1,
         gt=0,
         le=20,
         description="Maximum number of simultaneous open positions allowed",
@@ -142,8 +142,7 @@ class TradingStatus(BaseModel):
     daily_realized_loss_usd: float
     active_positions_count: int
     disclaimer: str = (
-        "SAFETY NOTICE: Live order execution is disabled in TokenIQ Phase 7.1. "
-        "The risk engine operates strictly in dry-run mode. Zero exchange orders will be placed."
+        "Operational safety status. Dry-run when trading is disabled; Testnet-only when enabled."
     )
 
 

@@ -4,26 +4,34 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
+# pyrefly: ignore[missing-import]
 from app.main import app
+# pyrefly: ignore[missing-import]
 from app.core.environment_guard import (
     validate_testnet_host,
     EnvironmentSafetyViolation,
     VERIFIED_TESTNET_HOSTS,
 )
+# pyrefly: ignore[missing-import]
 from app.exchanges.delta_client import delta_client
+# pyrefly: ignore[missing-import]
 from app.risk.service import risk_service
+# pyrefly: ignore[missing-import]
 from app.trading.gateway import (
     delta_testnet_gateway,
     ExchangeOrderRejectedError,
     OrderSubmissionTimeoutError,
 )
+# pyrefly: ignore[missing-import]
 from app.trading.models import (
     OrderConfirmRequest,
     OrderExecutionRecord,
     OrderPreviewRequest,
     OrderState,
 )
+# pyrefly: ignore[missing-import]
 from app.trading.service import order_execution_service
+# pyrefly: ignore[missing-import]
 from app.trading.store import execution_store
 
 client = TestClient(app)
@@ -81,6 +89,8 @@ SAMPLE_ACCOUNT_OK = {
 def setup_safety_environment():
     # Reset kill switch and enable trading for test baseline
     risk_service.engine.reset_kill_switch("Automated test suite initialization")
+    orig_notional = risk_service.engine.config.max_order_notional_usd
+    risk_service.engine.config.max_order_notional_usd = 500.0
     with patch.object(delta_client, "get_products", new_callable=AsyncMock) as mock_prod, \
          patch.object(delta_client, "get_account_overview", new_callable=AsyncMock) as mock_acc:
         mock_prod.return_value = SAMPLE_PRODUCTS
@@ -89,6 +99,7 @@ def setup_safety_environment():
         risk_service._cached_products = SAMPLE_PRODUCTS
         risk_service._products_cached_time = time.time()
         yield
+    risk_service.engine.config.max_order_notional_usd = orig_notional
 
 
 # ============================================================================
@@ -442,6 +453,7 @@ def test_strategy_signals_never_automatically_submit_orders():
 def test_production_url_in_execution_service_rejected():
     """Requirement 16: Execution service strictly rejects any attempt to route to production."""
     from unittest.mock import PropertyMock
+    # pyrefly: ignore[missing-import]
     from app.trading.gateway import DeltaTestnetOrderGateway
     with patch.object(DeltaTestnetOrderGateway, "host_url", new_callable=PropertyMock, return_value="https://api.delta.exchange"):
         with pytest.raises(EnvironmentSafetyViolation):
@@ -534,4 +546,94 @@ def test_kill_switch_activated_during_pending_workflow_prevents_submission():
         assert res_conf.status_code == 403
         assert "Kill Switch is ENGAGED" in res_conf.json()["detail"]
         assert mock_submit.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_exchange_error_preserves_unknown_state():
+    """Regression Test: If exchange query fails (401/network), order state remains UNKNOWN and reconciliation_needed is True."""
+    order_record = OrderExecutionRecord(
+        preview_id="prev_recon_test_1",
+        client_order_id="tokiq_recon_test_1",
+        symbol="BTCUSD",
+        product_id=27,
+        side="BUY",
+        order_type="limit_order",
+        size=1.0,
+        unfilled_size=1.0,
+        state=OrderState.UNKNOWN.value,
+        notional_usd=80.0,
+        created_at=int(time.time()),
+        updated_at=int(time.time()),
+        reconciliation_needed=True,
+        reconciliation_attempts=0,
+    )
+    await execution_store.save_order(order_record)
+
+    with patch.object(
+        delta_testnet_gateway,
+        "list_open_orders",
+        side_effect=RuntimeError("Delta API HTTP 401: IP not whitelisted"),
+    ), patch.object(delta_testnet_gateway, "submit_order", new_callable=AsyncMock) as mock_submit:
+        with pytest.raises(RuntimeError) as exc_info:
+            await order_execution_service.reconcile_order("tokiq_recon_test_1")
+
+        assert "Exchange unreachable" in str(exc_info.value)
+        # Order submission was NEVER called or blindly retried
+        assert mock_submit.call_count == 0
+
+    reloaded = await execution_store.get_order_by_id("tokiq_recon_test_1")
+    assert reloaded is not None
+    # State MUST remain UNKNOWN
+    assert reloaded.state == OrderState.UNKNOWN.value
+    assert reloaded.reconciliation_needed is True
+    # Verification attempts must NOT increment towards false expiry when exchange failed
+    assert reloaded.reconciliation_attempts == 0
+    assert "Reconciliation blocked by exchange communication error" in (reloaded.error_message or "")
+
+
+def test_runtime_storage_unpolluted_by_timeout_test():
+    """Regression Test: Running tests that simulate timeouts does NOT write to runtime execution_records.json."""
+    from pathlib import Path
+    import json
+
+    runtime_file = Path(__file__).resolve().parent.parent / "backend" / "app" / "trading" / "execution_records.json"
+    assert runtime_file.exists()
+
+    with open(runtime_file, "r", encoding="utf-8") as f:
+        before_data = json.load(f)
+    before_count = len(before_data.get("orders", []))
+
+    # Run order preview and timed-out confirmation
+    prev_req = {
+        "symbol": "BTCUSD",
+        "side": "BUY",
+        "order_type": "limit_order",
+        "quantity": 1.0,
+        "price": 80000.0,
+        "stop_loss": 79000.0,
+    }
+    res_prev = client.post("/api/v1/trading/orders/preview", json=prev_req)
+    assert res_prev.status_code == 200
+    preview_id = res_prev.json()["preview_id"]
+
+    with patch.object(
+        delta_testnet_gateway,
+        "submit_order",
+        side_effect=OrderSubmissionTimeoutError("tokiq_storage_test", "Request timed out"),
+    ):
+        res_conf = client.post(
+            "/api/v1/trading/orders/confirm",
+            json={"preview_id": preview_id, "confirm": True},
+        )
+        assert res_conf.status_code == 200
+        assert res_conf.json()["state"] == "UNKNOWN"
+
+    # Verify that the runtime file was completely untouched
+    with open(runtime_file, "r", encoding="utf-8") as f:
+        after_data = json.load(f)
+    after_count = len(after_data.get("orders", []))
+
+    assert before_count == after_count
+    # Ensure the newly created test order client_order_id does NOT exist in runtime file
+    assert not any(o.get("client_order_id") == res_conf.json()["client_order_id"] for o in after_data.get("orders", []))
 

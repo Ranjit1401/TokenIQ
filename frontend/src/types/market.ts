@@ -316,6 +316,8 @@ export interface WalletBalanceItemData {
   balance: number;
   available_balance: number;
   blocked_margin: number;
+  order_margin?: number;
+  position_margin?: number;
   usd_value?: number | null;
 }
 
@@ -361,12 +363,17 @@ export interface AccountOverviewData {
   total_balance_usd: number;
   available_balance_usd: number;
   total_margin_used_usd: number;
+  order_margin_usd?: number;
+  position_margin_usd?: number;
+  account_equity_usd?: number;
+  account_currency?: string;
   total_unrealized_pnl_usd: number;
   balances: WalletBalanceItemData[];
   positions: PositionItemData[];
   open_orders: OrderItemData[];
   recent_orders: OrderItemData[];
   last_updated_at: number;
+  last_balance_update_timestamp?: number;
   diagnostic?: string | null;
   warning?: string | null;
   disclaimer: string;
@@ -525,4 +532,123 @@ export interface ExecutionStatusResponseData {
   unknown_orders_count: number;
   disclaimer: string;
 }
+
+// ============================================================================
+// TokenIQ Full Automated Trading Types
+// ============================================================================
+
+export type AutomationStateType = 'OFF' | 'STARTING' | 'RUNNING' | 'PAUSED' | 'HALTED';
+export type PositionSizingModeType = 'fixed_contracts' | 'fixed_notional' | 'risk_budget';
+export type PositionLifecycleStateType =
+  | 'FLAT'
+  | 'ENTRY_SIGNAL'
+  | 'RISK_CHECK'
+  | 'ENTRY_PENDING'
+  | 'OPEN'
+  | 'PROTECTION_VERIFIED'
+  | 'EXIT_TRIGGERED'
+  | 'EXIT_PENDING';
+
+export interface AutomationConfigData {
+  enabled: boolean;
+  selected_strategy: string;
+  trading_symbol: string;
+  candle_interval: string;
+  strategy_parameters: Record<string, any>;
+  position_sizing_mode: PositionSizingModeType;
+  fixed_contract_quantity: number;
+  fixed_notional_usd: number;
+  risk_budget_usd: number;
+  maximum_order_notional: number;
+  maximum_position_size: number;
+  maximum_concurrent_positions: number;
+  maximum_daily_realized_loss: number;
+  maximum_orders_per_day: number;
+  maximum_trades_per_day: number;
+  protective_stop_loss_percentage: number;
+  take_profit_percentage?: number | null;
+  maximum_allowed_slippage: number;
+  cooldown_period_seconds: number;
+  allow_long: boolean;
+  allow_short: boolean;
+  allow_reentry: boolean;
+  allow_pyramiding: boolean;
+  require_confirmed_candle: boolean;
+}
+
+export interface AutomatedSignalData {
+  signal_id: string;
+  strategy_id: string;
+  strategy_version: string;
+  symbol: string;
+  timeframe: string;
+  candle_timestamp: number;
+  signal_direction: 'BUY' | 'SELL' | 'EXIT_LONG' | 'EXIT_SHORT' | 'NO_SIGNAL';
+  position_intent: string;
+  entry_rationale: string;
+  intended_price: number;
+  intended_quantity: number;
+  stop_loss_price?: number | null;
+  take_profit_price?: number | null;
+  created_at: number;
+  idempotency_key: string;
+  lifecycle_state: string;
+  rejection_reason?: string | null;
+  client_order_id?: string | null;
+  exchange_order_id?: string | null;
+}
+
+export interface PositionStateRecordData {
+  symbol: string;
+  product_id: number;
+  lifecycle_state: PositionLifecycleStateType;
+  side?: 'LONG' | 'SHORT' | null;
+  quantity: number;
+  average_entry_price: number;
+  current_notional_usd: number;
+  entry_order_id?: string | null;
+  entry_client_order_id?: string | null;
+  stop_loss_order_id?: string | null;
+  stop_loss_price?: number | null;
+  take_profit_order_id?: string | null;
+  take_profit_price?: number | null;
+  protection_verified: boolean;
+  opened_at?: number | null;
+  updated_at: number;
+  closed_at?: number | null;
+  realized_pnl_usd: number;
+  last_exit_reason?: string | null;
+}
+
+export interface AutomationStatusResponseData {
+  state: AutomationStateType;
+  enabled: boolean;
+  is_paused: boolean;
+  pause_reason?: string | null;
+  kill_switch_engaged: boolean;
+  testnet_enforced: boolean;
+  verified_host: string;
+  config: AutomationConfigData;
+  active_position?: PositionStateRecordData | null;
+  latest_signal?: AutomatedSignalData | null;
+  latest_signal_rejection_reason?: string | null;
+  latest_order_status?: string | null;
+  orders_submitted_today: number;
+  trades_completed_today: number;
+  daily_realized_pnl_usd: number;
+  current_exposure_usd: number;
+  last_candle_timestamp?: number | null;
+  last_market_data_update_at?: number | null;
+  last_reconciliation_at?: number | null;
+  last_reconciliation_result?: string | null;
+  last_error?: string | null;
+  worker_uptime_seconds: number;
+  wallet_balance_usd?: number | null;
+  available_margin_usd?: number | null;
+  account_equity_usd?: number | null;
+  daily_loss_limit_usd?: number | null;
+  worker_heartbeat_at?: number | null;
+  disclaimer: string;
+}
+
 

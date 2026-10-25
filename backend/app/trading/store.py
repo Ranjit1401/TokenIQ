@@ -36,11 +36,17 @@ class ExecutionStore:
                 consumed = raw.get("consumed_previews") or {}
                 self._consumed_previews = {k: int(v) for k, v in consumed.items()}
                 orders_raw = raw.get("orders") or []
+                loaded_orders: Dict[str, OrderExecutionRecord] = {}
                 for o in orders_raw:
                     rec = OrderExecutionRecord(**o)
-                    self._orders[rec.client_order_id] = rec
+                    loaded_orders[rec.client_order_id] = rec
+                self._orders = loaded_orders
         except Exception as exc:
             logger.error(f"Failed to load execution records from {self.data_file}: {exc}")
+
+    def reload_from_disk(self) -> None:
+        """Explicitly synchronize in-memory state with persisted file."""
+        self._load_from_disk()
 
     def _save_to_disk(self) -> None:
         """Atomically persist state to disk."""
@@ -136,10 +142,15 @@ class ExecutionStore:
 
     async def get_active_orders(self) -> List[OrderExecutionRecord]:
         async with self._lock:
-            return [
-                rec for rec in self._orders.values()
-                if rec.state in (OrderState.OPEN.value, OrderState.PENDING.value, OrderState.SUBMITTED.value)
-            ]
+            return sorted(
+                [
+                    rec for rec in self._orders.values()
+                    if rec.state in (OrderState.OPEN.value, OrderState.PENDING.value, OrderState.SUBMITTED.value)
+                    and not rec.reconciliation_needed
+                ],
+                key=lambda r: r.created_at,
+                reverse=True,
+            )
 
     async def get_unknown_orders(self) -> List[OrderExecutionRecord]:
         async with self._lock:

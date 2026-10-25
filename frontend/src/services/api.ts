@@ -6,13 +6,97 @@ import type {
   MarketTicker,
 } from '../types/market';
 
-// Base API paths (Vite dev proxy forwards /api -> http://localhost:8000)
-const API_V1_BASE = '/api/v1';
-const FALLBACK_V1_BASE = 'http://localhost:8000/api/v1';
+/**
+ * Resolves the API base URL.
+ * In production on Vercel: VITE_API_BASE_URL (e.g. https://tokeniq-backend.onrender.com) is used.
+ * In local development: defaults to relative '/api/v1' which is proxied by Vite dev server to http://127.0.0.1:8000.
+ */
+function resolveApiBaseUrl(): { primary: string; fallback: string } {
+  const envObj = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const rawBase = (envObj?.VITE_API_BASE_URL || (import.meta as any).env?.VITE_API_BASE_URL)?.trim().replace(/\/+$/, '');
+  if (!rawBase) {
+    return {
+      primary: '/api/v1',
+      fallback: 'http://127.0.0.1:8000/api/v1',
+    };
+  }
+
+  // Normalize if trailing /api or /api/v1 is already present
+  const baseV1 = rawBase.endsWith('/api/v1')
+    ? rawBase
+    : rawBase.endsWith('/api')
+      ? `${rawBase}/v1`
+      : `${rawBase}/api/v1`;
+
+  return {
+    primary: baseV1,
+    fallback: baseV1,
+  };
+}
+
+export const { primary: API_V1_BASE, fallback: FALLBACK_V1_BASE } = resolveApiBaseUrl();
+
+export class ApiClientError extends Error {
+  status: number;
+  data: any;
+
+  constructor(message: string, status: number, data?: any) {
+    super(message);
+    this.name = 'ApiClientError';
+    this.status = status;
+    this.data = data;
+    Object.setPrototypeOf(this, ApiClientError.prototype);
+  }
+}
+
+function parseErrorDetail(errBody: any, fallbackStatusText: string): string {
+  if (!errBody) return fallbackStatusText;
+  
+  const detail = errBody.detail !== undefined ? errBody.detail : errBody.message;
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  
+  if (detail && typeof detail === 'object') {
+    let msg = detail.message || detail.reason || detail.code || fallbackStatusText;
+    if (detail.actionable_guidance) {
+      msg = `${msg} Guidance: ${detail.actionable_guidance}`;
+    }
+    return msg;
+  }
+  
+  return fallbackStatusText;
+}
 
 async function fetchFromApi<T>(path: string, options: RequestInit = {}, timeoutMs = 25000): Promise<T> {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms`, 'TimeoutError'));
+  }, timeoutMs);
+
+  // Propagate caller's abort signal if provided
+  let callerAbortHandler: (() => void) | null = null;
+  if (options.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(timeoutId);
+      controller.abort(options.signal.reason);
+    } else {
+      callerAbortHandler = () => {
+        clearTimeout(timeoutId);
+        controller.abort(options.signal?.reason);
+      };
+      options.signal.addEventListener('abort', callerAbortHandler, { once: true });
+    }
+  }
+
+  const cleanup = () => {
+    clearTimeout(timeoutId);
+    if (options.signal && callerAbortHandler) {
+      options.signal.removeEventListener('abort', callerAbortHandler);
+    }
+  };
 
   const reqHeaders = {
     Accept: 'application/json',
@@ -27,32 +111,86 @@ async function fetchFromApi<T>(path: string, options: RequestInit = {}, timeoutM
       signal: controller.signal,
       headers: reqHeaders,
     });
-    clearTimeout(id);
+    cleanup();
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      const detail = errBody.detail || `HTTP ${res.status}: ${res.statusText}`;
-      throw new Error(detail);
+      const message = parseErrorDetail(errBody, `HTTP ${res.status}: ${res.statusText}`);
+      
+      // Safety rule: Do not retry 4xx client errors (400, 401, 403, 404, 409, 422) against fallback URL
+      if (res.status >= 400 && res.status < 500) {
+        throw new ApiClientError(message, res.status, errBody);
+      }
+      throw new Error(message);
     }
     return await res.json();
   } catch (err: unknown) {
-    clearTimeout(id);
-    // Attempt 2: Direct localhost:8000 fallback
+    cleanup();
+
+    // Never retry if caller explicitly cancelled the request
+    if (options.signal?.aborted) {
+      throw err;
+    }
+
+    // Never retry 4xx client rejections against a secondary fallback URL
+    if (err instanceof ApiClientError) {
+      throw err;
+    }
+
+    // If this request timed out, throw an explicit timeout error rather than retrying indefinitely
+    if (timedOut) {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+
+    // Attempt 2: Direct 127.0.0.1:8000 fallback (only for proxy/network/gateway failures)
+    const fbController = new AbortController();
+    let fbTimedOut = false;
+    const fbTimeoutId = setTimeout(() => {
+      fbTimedOut = true;
+      fbController.abort(new DOMException(`Backend fallback request timed out after ${timeoutMs}ms`, 'TimeoutError'));
+    }, timeoutMs);
+
+    let fbCallerHandler: (() => void) | null = null;
+    if (options.signal) {
+      if (options.signal.aborted) {
+        clearTimeout(fbTimeoutId);
+        fbController.abort(options.signal.reason);
+      } else {
+        fbCallerHandler = () => {
+          clearTimeout(fbTimeoutId);
+          fbController.abort(options.signal?.reason);
+        };
+        options.signal.addEventListener('abort', fbCallerHandler, { once: true });
+      }
+    }
+
+    const fbCleanup = () => {
+      clearTimeout(fbTimeoutId);
+      if (options.signal && fbCallerHandler) {
+        options.signal.removeEventListener('abort', fbCallerHandler);
+      }
+    };
+
     try {
-      const fallbackController = new AbortController();
-      const fbId = setTimeout(() => fallbackController.abort(), timeoutMs);
       const res = await fetch(`${FALLBACK_V1_BASE}${path}`, {
         ...options,
-        signal: fallbackController.signal,
+        signal: fbController.signal,
         headers: reqHeaders,
       });
-      clearTimeout(fbId);
+      fbCleanup();
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        const detail = errBody.detail || `Backend fallback HTTP ${res.status}`;
-        throw new Error(detail);
+        const message = parseErrorDetail(errBody, `Backend fallback HTTP ${res.status}`);
+        throw new ApiClientError(message, res.status, errBody);
       }
       return await res.json();
-    } catch {
+    } catch (fbErr: unknown) {
+      fbCleanup();
+      if (fbErr instanceof ApiClientError) {
+        throw fbErr;
+      }
+      if (fbTimedOut) {
+        throw new Error(`Backend fallback request timed out after ${timeoutMs}ms`);
+      }
       throw err instanceof Error ? err : new Error(String(err));
     }
   }
@@ -442,5 +580,107 @@ export async function reconcileOrder(orderId: string): Promise<OrderExecutionRec
     15000
   );
 }
+
+// ============================================================================
+// TokenIQ Full Automated Trading Engine API Clients
+// ============================================================================
+
+import type {
+  AutomationConfigData,
+  AutomationStatusResponseData,
+  AutomatedSignalData,
+  PositionStateRecordData,
+} from '../types/market';
+
+export async function getAutomationStatus(options?: RequestInit): Promise<AutomationStatusResponseData> {
+  return fetchFromApi<AutomationStatusResponseData>('/automation/status', { method: 'GET', ...options }, 18000);
+}
+
+export async function getAutomationConfig(options?: RequestInit): Promise<AutomationConfigData> {
+  return fetchFromApi<AutomationConfigData>('/automation/config', { method: 'GET', ...options }, 18000);
+}
+
+export async function updateAutomationConfig(config: AutomationConfigData): Promise<AutomationConfigData> {
+  return fetchFromApi<AutomationConfigData>(
+    '/automation/config',
+    {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    },
+    15000
+  );
+}
+
+export async function validateAutomationConfig(config: AutomationConfigData): Promise<{ valid: boolean; reasons: string[] }> {
+  return fetchFromApi<{ valid: boolean; reasons: string[] }>(
+    '/automation/config/validate',
+    {
+      method: 'POST',
+      body: JSON.stringify(config),
+    },
+    15000
+  );
+}
+
+export async function enableAutomation(confirm: boolean, acknowledgement?: string): Promise<AutomationStatusResponseData> {
+  return fetchFromApi<AutomationStatusResponseData>(
+    '/automation/enable',
+    {
+      method: 'POST',
+      body: JSON.stringify({ confirm, acknowledgement }),
+    },
+    18000
+  );
+}
+
+export async function stopAutomation(): Promise<AutomationStatusResponseData> {
+  return fetchFromApi<AutomationStatusResponseData>(
+    '/automation/stop',
+    {
+      method: 'POST',
+    },
+    15000
+  );
+}
+
+export async function pauseAutomation(reason?: string): Promise<AutomationStatusResponseData> {
+  return fetchFromApi<AutomationStatusResponseData>(
+    '/automation/pause',
+    {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    },
+    15000
+  );
+}
+
+export async function resumeAutomation(): Promise<AutomationStatusResponseData> {
+  return fetchFromApi<AutomationStatusResponseData>(
+    '/automation/resume',
+    {
+      method: 'POST',
+    },
+    15000
+  );
+}
+
+export async function listAutomationSignals(limit: number = 50, options?: RequestInit): Promise<AutomatedSignalData[]> {
+  return fetchFromApi<AutomatedSignalData[]>(`/automation/signals?limit=${limit}`, { method: 'GET', ...options }, 18000);
+}
+
+export async function listAutomationPositions(): Promise<PositionStateRecordData[]> {
+  return fetchFromApi<PositionStateRecordData[]>('/automation/positions', { method: 'GET' }, 12000);
+}
+
+export async function reconcileAutomationPosition(symbol: string): Promise<PositionStateRecordData> {
+  return fetchFromApi<PositionStateRecordData>(
+    `/automation/reconcile?symbol=${encodeURIComponent(symbol)}`,
+    {
+      method: 'POST',
+    },
+    15000
+  );
+}
+
 
 

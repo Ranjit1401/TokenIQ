@@ -229,10 +229,21 @@ class DeltaTestnetOrderGateway:
                 if response.status_code == 200:
                     data = response.json()
                     return data.get("result")
+                try:
+                    err_json = response.json()
+                    err_code = (err_json.get("error") or {}).get("code")
+                    if err_code == "order_not_found":
+                        logger.info(f"Order {order_id} conclusively reported not found by exchange.")
+                        return {"_not_found_on_exchange": True}
+                except Exception:
+                    pass
                 return None
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                logger.error(f"Network transport error querying order {order_id}: {exc}")
+                raise exc
             except Exception as exc:
                 logger.warning(f"Failed to fetch order {order_id} from exchange: {exc}")
-                return None
+                raise exc
 
     async def list_open_orders(self, product_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """

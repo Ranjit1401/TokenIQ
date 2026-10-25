@@ -81,7 +81,7 @@ class RiskManagementService:
             kill_switch_reason=state.kill_switch_reason,
             kill_switch_activated_at=state.kill_switch_activated_at,
             last_reset_at=state.last_reset_at,
-            dry_run_mode=True,
+            dry_run_mode=not state.trading_enabled,
             testnet_enforced=True,
             base_url=delta_client.host_url,
             active_risk_limits=self.engine.config,
@@ -89,6 +89,11 @@ class RiskManagementService:
             evaluations_today=state.evaluations_today,
             daily_realized_loss_usd=round(daily_loss, 2),
             active_positions_count=active_pos_count,
+            disclaimer=(
+                "Dry-run simulation mode active. Live order execution is disabled."
+                if not state.trading_enabled
+                else "Authorized Testnet execution active on Delta Exchange India Testnet. Production trading is strictly impossible."
+            ),
         )
 
     def get_risk_config(self) -> RiskConfig:

@@ -311,11 +311,29 @@ class OrderExecutionService:
         if not record:
             raise ValueError(f"Order '{order_id_or_client_id}' not found in execution store.")
 
-        record.reconciliation_attempts += 1
         record.reconciliation_last_at = int(time.time())
 
-        # 1. Query open orders on exchange
-        open_orders = await delta_testnet_gateway.list_open_orders(product_id=record.product_id)
+        # 1. Query open orders on exchange with explicit communication error handling
+        try:
+            open_orders = await delta_testnet_gateway.list_open_orders(product_id=record.product_id)
+        except Exception as exc:
+            # Preserve or transition to explicit UNKNOWN state when exchange status cannot be verified
+            logger.warning(
+                f"Exchange query failed during reconciliation of order {record.client_order_id}: {exc}"
+            )
+            record.state = OrderState.UNKNOWN.value
+            record.exchange_state = "unverified"
+            record.reconciliation_needed = True
+            record.error_message = f"Reconciliation blocked by exchange communication error: {exc}"
+            await execution_store.save_order(record)
+            raise RuntimeError(
+                f"Cannot reconcile order '{record.client_order_id}': Exchange unreachable ({exc}). "
+                "Order status remains UNKNOWN pending verified exchange connectivity."
+            )
+
+        # Increment verified reconciliation attempts only after a successful exchange query
+        record.reconciliation_attempts += 1
+
         matched_open = next(
             (
                 o for o in open_orders
@@ -331,30 +349,58 @@ class OrderExecutionService:
             record.exchange_state = str(matched_open.get("state") or "open")
             record.unfilled_size = float(matched_open.get("unfilled_size") or 0.0)
             record.reconciliation_needed = False
+            record.error_message = None
             await execution_store.save_order(record)
             return record
 
         # 2. Check single order status if we have order_id
+        is_conclusively_not_found = False
         if record.order_id:
-            order_detail = await delta_testnet_gateway.get_order_by_id(record.order_id)
-            if order_detail:
-                state_raw = str(order_detail.get("state") or "").lower()
-                if "fill" in state_raw:
-                    record.state = OrderState.FILLED.value
-                elif "cancel" in state_raw:
-                    record.state = OrderState.CANCELLED.value
-                elif "open" in state_raw or "pending" in state_raw:
-                    record.state = OrderState.OPEN.value
-                record.exchange_state = state_raw
-                record.reconciliation_needed = False
+            try:
+                order_detail = await delta_testnet_gateway.get_order_by_id(record.order_id)
+                if order_detail:
+                    if order_detail.get("_not_found_on_exchange"):
+                        is_conclusively_not_found = True
+                    else:
+                        state_raw = str(order_detail.get("state") or "").lower()
+                        if "fill" in state_raw:
+                            record.state = OrderState.FILLED.value
+                        elif "cancel" in state_raw:
+                            record.state = OrderState.CANCELLED.value
+                        elif "open" in state_raw or "pending" in state_raw:
+                            record.state = OrderState.OPEN.value
+                        record.exchange_state = state_raw
+                        record.reconciliation_needed = False
+                        record.error_message = None
+                        await execution_store.save_order(record)
+                        return record
+            except Exception as exc:
+                logger.warning(f"Failed to fetch order detail for {record.order_id}: {exc}")
+                record.state = OrderState.UNKNOWN.value
+                record.exchange_state = "unverified"
+                record.reconciliation_needed = True
+                record.error_message = f"Reconciliation blocked by exchange communication error: {exc}"
                 await execution_store.save_order(record)
-                return record
+                raise RuntimeError(
+                    f"Cannot reconcile order '{record.client_order_id}': Exchange detail query failed ({exc}). "
+                    "Order status remains UNKNOWN pending verified exchange connectivity."
+                )
 
-        # If not found on exchange after 3 attempts or 120s, mark as FAILED
-        if record.reconciliation_attempts >= 3:
+        # 3. Conclusively mark as REJECTED if exchange proved order does not exist.
+        # If missing from open orders and not conclusively verified on exchange, mark UNKNOWN.
+        if is_conclusively_not_found:
             record.state = OrderState.REJECTED.value
+            record.exchange_state = "not_found"
             record.reconciliation_needed = False
             record.error_message = "Reconciliation conclusive: Order not found on Delta Exchange Testnet."
+            await execution_store.save_order(record)
+        elif record.state in (OrderState.OPEN.value, OrderState.SUBMITTED.value, OrderState.PENDING.value):
+            record.state = OrderState.UNKNOWN.value
+            record.exchange_state = "unverified"
+            record.reconciliation_needed = True
+            record.error_message = "Order absent from open orders but exchange status inconclusive. Marked UNKNOWN pending verification."
+            await execution_store.save_order(record)
+        else:
             await execution_store.save_order(record)
 
         return record

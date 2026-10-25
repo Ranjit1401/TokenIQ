@@ -9,14 +9,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+# pyrefly: ignore[missing-import]
 from app.main import app
+# pyrefly: ignore[missing-import]
 from app.risk.engine import RiskEngine
+# pyrefly: ignore[missing-import]
 from app.risk.models import (
     CheckStatus,
     RiskCheckRequest,
     RiskConfig,
     SafetyState,
 )
+# pyrefly: ignore[missing-import]
 from app.risk.service import RiskManagementService
 
 client = TestClient(app)
@@ -110,7 +114,7 @@ async def test_approved_when_trading_enabled_and_all_rules_pass(temp_risk_engine
     req = RiskCheckRequest(
         symbol="BTCUSD",
         side="BUY",
-        quantity=10.0,  # 10 * 0.001 * 80000 = $800.00 notional (under $5,000 limit)
+        quantity=5.0,  # 5 * 0.001 * 80000 = $400.00 notional (under stricter $500 limit)
         price=80000.0,
         stop_loss=79000.0,  # distance = 1.25% (>= 0.5% min)
         signal_id="sig_valid_1",
@@ -120,7 +124,7 @@ async def test_approved_when_trading_enabled_and_all_rules_pass(temp_risk_engine
     assert result.approved is True
     assert result.decision == "APPROVED"
     assert len(result.reasons) == 0
-    assert result.proposed_notional_usd == 800.0
+    assert result.proposed_notional_usd == 400.0
 
 
 @pytest.mark.asyncio
@@ -458,7 +462,7 @@ def test_api_trading_status_endpoint():
     data = res.json()
     assert "trading_enabled" in data
     assert "kill_switch_engaged" in data
-    assert data["dry_run_mode"] is True
+    assert data["dry_run_mode"] == (not data["trading_enabled"])
     assert data["testnet_enforced"] is True
 
 
@@ -514,6 +518,7 @@ def test_dry_run_risk_check_never_calls_order_execution():
     including under error conditions.
     """
     from unittest.mock import MagicMock
+    # pyrefly: ignore[missing-import]
     from app.exchanges.delta_client import delta_client
 
     # 1. Structural audit: delta_client strictly lacks order placement methods
