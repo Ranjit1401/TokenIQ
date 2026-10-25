@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "selected_strategy": "ema_crossover",
   "trading_symbol": "BTCUSD",
   "candle_interval": "1h",
